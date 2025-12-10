@@ -8,9 +8,11 @@ that can be applied to ZarrNii images.
 from .base import SegmentationPlugin
 from .local_otsu import LocalOtsuSegmentation
 from .threshold import ThresholdSegmentation
+from .vesselfm import VesselFM
 
 __all__ = [
     "SegmentationPlugin",
     "LocalOtsuSegmentation",
     "ThresholdSegmentation",
+    "VesselFM",
 ]

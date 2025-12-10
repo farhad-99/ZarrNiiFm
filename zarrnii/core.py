@@ -4680,11 +4680,32 @@ class ZarrNii:
         )
 
         # Create new NgffImage with segmented data
+        # new_ngff_image = nz.NgffImage(
+        #     data=segmented_data,
+        #     dims=self.dims.copy(),
+        #     scale=self.scale.copy(),
+        #     translation=self.translation.copy(),
+        #     name=f"{self.name}_segmented_{plugin.name.lower().replace(' ', '_')}",
+        # )
+        # Safely handle dims (which might be a tuple)
+        if isinstance(self.dims, tuple):
+            dims = list(self.dims)
+        else:
+            dims = self.dims.copy()
+
+        # Keep scale and translation as their original types (dict / array), just copy
+        scale = self.scale.copy() if hasattr(self.scale, "copy") else self.scale
+        translation = (
+            self.translation.copy()
+            if hasattr(self.translation, "copy")
+            else self.translation
+        )
+
         new_ngff_image = nz.NgffImage(
             data=segmented_data,
-            dims=self.dims.copy(),
-            scale=self.scale.copy(),
-            translation=self.translation.copy(),
+            dims=dims,
+            scale=scale,
+            translation=translation,
             name=f"{self.name}_segmented_{plugin.name.lower().replace(' ', '_')}",
         )
 
