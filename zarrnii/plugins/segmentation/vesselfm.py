@@ -14,6 +14,27 @@ from skimage.filters import threshold_otsu
 
 from .base import SegmentationPlugin, hookimpl
 
+import logging
+import warnings
+from pathlib import Path
+
+import torch
+import torch.nn.functional as F
+import hydra
+import numpy as np
+from tqdm import tqdm
+from huggingface_hub import hf_hub_download
+from monai.inferers import SlidingWindowInfererAdapt
+from skimage.morphology import remove_small_objects
+from skimage.exposure import equalize_hist
+
+from vesselfm.seg.utils.data import generate_transforms
+from vesselfm.seg.utils.io import determine_reader_writer
+from vesselfm.seg.utils.evaluation import Evaluator, calculate_mean_metrics
+
+
+warnings.filterwarnings("ignore")
+logger = logging.getLogger(__name__)
 
 class VesselFM(SegmentationPlugin):
     """
@@ -29,7 +50,7 @@ class VesselFM(SegmentationPlugin):
         nbins: Number of bins for histogram computation (default: 256)
     """
 
-    def __init__(self, nbins: int = 256, **kwargs):
+    def __init__(self,cfg=None, nbins: int = 256, **kwargs):
         """
         Initialize Vessel FM segmentation plugin.
 
@@ -38,7 +59,32 @@ class VesselFM(SegmentationPlugin):
             **kwargs: Additional parameters passed to parent class
         """
         super().__init__(nbins=nbins, **kwargs)
+        if cfg is not None:
+            self.cfg = cfg
+            device = self.cfg.device
+            logger.info(f"Loading model from {cfg.ckpt_path}.")
+            ckpt = torch.load(Path(cfg.ckpt_path), map_location=device, weights_only=True)
+
+            model = hydra.utils.instantiate(cfg.model)
+            model.load_state_dict(ckpt)
+            self.model = model
+
+            transforms = generate_transforms(cfg.transforms_config)
+            self.transforms = transforms
+
+            logger.debug(f"Sliding window patch size: {cfg.patch_size}")
+            logger.debug(f"Sliding window batch size: {cfg.batch_size}.")
+            logger.debug(f"Sliding window overlap: {cfg.overlap}.")
+            inferer = SlidingWindowInfererAdapt(
+                roi_size=cfg.patch_size, sw_batch_size=cfg.batch_size, overlap=cfg.overlap, 
+                mode=cfg.mode, sigma_scale=cfg.sigma_scale, padding_mode=cfg.padding_mode
+            )
+            self.inferer = inferer
+
         self.nbins = nbins
+
+
+        
 
     @hookimpl
     def segment(
@@ -58,6 +104,13 @@ class VesselFM(SegmentationPlugin):
         Raises:
             ValueError: If input image is empty or has invalid dimensions
         """
+        #print("size:",image.size)
+        #print("shape:",image.shape)
+        #try:
+        #    print("type:", image)
+        #except:
+        #    print('no type')
+        device = self.cfg.device
         if image.size == 0:
             raise ValueError("Input image is empty")
 
@@ -102,6 +155,24 @@ class VesselFM(SegmentationPlugin):
                 return np.zeros(original_shape, dtype=np.uint8)
             else:
                 raise e
+        np.random.seed(self.cfg.seed)
+        torch.manual_seed(self.cfg.seed)
+        torch.cuda.manual_seed_all(self.cfg.seed)
+
+        # set device
+
+
+        # load model and ckpt
+        model = self.model
+        model.eval()
+        # with torch.no_grad():
+        #     # for idx, image_path in tqdm(enumerate(image_paths), total=len(image_paths), desc="Processing images."):
+        #     preds = [] # average over test time augmentations
+            
+        #         # apply pre-processing transforms
+        #     image = self.transforms(image).astype(np.float32).to(self.device)
+                
+                
 
         # Apply threshold to original image
         binary_mask = image > threshold
