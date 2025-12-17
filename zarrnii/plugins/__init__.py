@@ -14,6 +14,7 @@ __all__ = [
     "SegmentationPlugin",
     "OtsuSegmentation",  # Backward compatibility
     "LocalOtsuSegmentation",
+    "VesselFM",
     "ThresholdSegmentation",
     "ScaledProcessingPlugin",
     "GaussianBiasFieldCorrection",

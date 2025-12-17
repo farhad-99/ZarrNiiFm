@@ -97,109 +97,6 @@ class MetadataInvalidError(Exception):
     pass
 
 
-# OME-Zarr version for ZIP archive comment
-_OME_ZARR_VERSION = "0.5"
-
-
-def _is_ome_zarr_zip_path(path: str) -> bool:
-    """Check if a path should be treated as an OME-Zarr zip file.
-
-    Supports both the new .ozx extension and legacy .zip extension for
-    backward compatibility.
-
-    Args:
-        path: File path to check
-
-    Returns:
-        True if the path ends with .ozx or .zip
-    """
-    return path.endswith(".ozx") or path.endswith(".zip")
-
-
-def _create_ome_zarr_zip(source_dir: str, zip_path: str) -> None:
-    """Create an OME-Zarr zip file according to the approved spec.
-
-    This function creates a ZIP archive from an OME-Zarr directory following
-    the OME-Zarr single-file specification:
-    - Uses ZIP64 format extension
-    - Disables ZIP-level compression (uses STORED)
-    - Places root zarr.json as the first entry
-    - Orders other zarr.json files in breadth-first order after root
-    - Adds ZIP archive comment with OME-Zarr version JSON
-
-    Args:
-        source_dir: Path to the source OME-Zarr directory
-        zip_path: Path for the output ZIP file
-
-    Raises:
-        OSError: If unable to create the ZIP file
-    """
-    import json
-    import os
-    import zipfile
-
-    # Collect all files from the source directory
-    all_files = []
-    for root, dirs, files in os.walk(source_dir):
-        for file in files:
-            full_path = os.path.join(root, file)
-            rel_path = os.path.relpath(full_path, source_dir).replace(os.sep, "/")
-            all_files.append((rel_path, full_path))
-        # Also include directories (needed for proper archive structure)
-        for dir_name in dirs:
-            full_path = os.path.join(root, dir_name)
-            rel_path = os.path.relpath(full_path, source_dir).replace(os.sep, "/") + "/"
-            all_files.append((rel_path, None))  # None indicates directory
-
-    # Separate zarr.json files from other files for proper ordering
-    zarr_json_files = []
-    other_files = []
-
-    for rel_path, full_path in all_files:
-        if rel_path.endswith("zarr.json"):
-            zarr_json_files.append((rel_path, full_path))
-        else:
-            other_files.append((rel_path, full_path))
-
-    # Sort zarr.json files in breadth-first order
-    # Root zarr.json first (shortest path), then by depth and name
-    def breadth_first_key(item):
-        rel_path = item[0]
-        depth = rel_path.count("/")
-        return (depth, rel_path)
-
-    zarr_json_files.sort(key=breadth_first_key)
-
-    # Sort other files for consistent ordering
-    other_files.sort(key=lambda x: x[0])
-
-    # Combine: zarr.json files first (breadth-first order), then other files
-    ordered_files = zarr_json_files + other_files
-
-    # Create ZIP archive comment with OME-Zarr version
-    archive_comment = json.dumps({"ome": {"version": _OME_ZARR_VERSION}})
-
-    # Create ZIP file with ZIP64 extension and no compression
-    with zipfile.ZipFile(
-        zip_path,
-        mode="w",
-        compression=zipfile.ZIP_STORED,  # No compression
-        allowZip64=True,  # Use ZIP64 format extension
-    ) as zf:
-        # Set the archive comment
-        zf.comment = archive_comment.encode("utf-8")
-
-        for rel_path, full_path in ordered_files:
-            if full_path is None:
-                # Directory entry - explicitly set compression type
-                info = zipfile.ZipInfo(rel_path)
-                info.compress_type = zipfile.ZIP_STORED
-                zf.writestr(info, "")
-            else:
-                # File entry - read and write with no compression
-                zf.write(full_path, rel_path, compress_type=zipfile.ZIP_STORED)
-
-
 # NgffImage-based function library
 # These functions operate directly on ngff_zarr.NgffImage objects
 
@@ -247,8 +144,8 @@ def load_ngff_image(
     """
     import zarr
 
-    # Handle OME-Zarr zip files by creating a ZipStore
-    if isinstance(store_or_path, str) and _is_ome_zarr_zip_path(store_or_path):
+    # Handle ZIP files by creating a ZipStore
+    if isinstance(store_or_path, str) and store_or_path.endswith(".zip"):
         store = zarr.storage.ZipStore(store_or_path, mode="r")
         multiscales = nz.from_ngff_zarr(store, storage_options=storage_options)
         store.close()
@@ -302,17 +199,10 @@ def save_ngff_image(
         >>> # Save with default pyramid levels
         >>> save_ngff_image(img, "/path/to/output.zarr")
 
-        >>> # Save to OME-Zarr zip with custom pyramid (new .ozx extension)
-        >>> save_ngff_image(img, "/path/to/output.ozx",
-        ...                 scale_factors=[2, 4], xyz_orientation="RAS")
-
-        >>> # Save to ZIP with legacy extension (backward compatible)
+        >>> # Save to ZIP with custom pyramid
         >>> save_ngff_image(img, "/path/to/output.zarr.zip",
         ...                 scale_factors=[2, 4], xyz_orientation="RAS")
     """
-    import os
-    import tempfile
-
     import zarr
 
     if scale_factors is None:
@@ -335,10 +225,13 @@ def save_ngff_image(
         ngff_image, scale_factors=scale_factors, chunks=chunks
     )
 
-    # Check if the target is an OME-Zarr zip file (based on extension)
-    if isinstance(store_or_path, str) and _is_ome_zarr_zip_path(store_or_path):
-        # For OME-Zarr zip files, use temp directory approach
-        # then create spec-compliant ZIP archive
+    # Check if the target is a ZIP file (based on extension)
+    if isinstance(store_or_path, str) and store_or_path.endswith(".zip"):
+        # For ZIP files, use temp directory approach due to zarr v3.x ZipStore compatibility issues
+        import os
+        import shutil
+        import tempfile
+
         with tempfile.TemporaryDirectory() as tmpdir:
             # Save to temporary directory first
             temp_zarr_path = os.path.join(tmpdir, "temp.zarr")
@@ -353,8 +246,9 @@ def save_ngff_image(
                     # If we can't write orientation metadata, that's not critical
                     pass
 
-            # Create OME-Zarr zip file according to spec
-            _create_ome_zarr_zip(temp_zarr_path, store_or_path)
+            # Create ZIP file from the directory
+            zip_base_path = store_or_path.replace(".zip", "")
+            shutil.make_archive(zip_base_path, "zip", temp_zarr_path)
     else:
         # Write to zarr store directly
         nz.to_ngff_zarr(store_or_path, multiscales, **kwargs)
@@ -392,7 +286,7 @@ def save_ngff_image_with_ome_zarr(
     Args:
         ngff_image: NgffImage object to save containing data and metadata
         store_or_path: Target store or path. Supports local paths, remote URLs,
-            and .ozx or .zip extensions for OME-Zarr zip creation
+            and .zip extensions for ZipStore creation
         max_layer: Maximum number of pyramid levels to create (including level 0)
         scale_factors: Custom scale factors for each pyramid level. If None,
             uses powers of 2: [2, 4, 8, ...]
@@ -412,11 +306,7 @@ def save_ngff_image_with_ome_zarr(
         >>> # Save with default pyramid levels
         >>> save_ngff_image_with_ome_zarr(img, "/path/to/output.zarr")
 
-        >>> # Save to OME-Zarr zip with custom pyramid (new .ozx extension)
-        >>> save_ngff_image_with_ome_zarr(img, "/path/to/output.ozx",
-        ...                                scale_factors=[2, 4], xyz_orientation="RAS")
-
-        >>> # Save to ZIP with legacy extension (backward compatible)
+        >>> # Save to ZIP with custom pyramid
         >>> save_ngff_image_with_ome_zarr(img, "/path/to/output.zarr.zip",
         ...                                scale_factors=[2, 4], xyz_orientation="RAS")
 
@@ -425,12 +315,14 @@ def save_ngff_image_with_ome_zarr(
         >>> client = Client()
         >>> save_ngff_image_with_ome_zarr(img, "/path/to/output.zarr", compute=True)
     """
-    import os
-    import tempfile
-
     import zarr
+    from ome_zarr.format import FormatV04
     from ome_zarr.scale import Scaler
     from ome_zarr.writer import write_image
+
+    # Force use of OME-NGFF v0.4 format (Zarr v2) instead of v0.5 (Zarr v3)
+    # This ensures compatibility with existing tools and avoids .zarr.json files
+    fmt = FormatV04()
 
     # Note: ome-zarr's Scaler interprets max_layer as the highest pyramid level index
     # (not count), so max_layer=N creates N+1 levels: 0, 1, ..., N
@@ -456,14 +348,18 @@ def save_ngff_image_with_ome_zarr(
         # ome-zarr max_layer is the highest index, so max_layer-1 for N total levels
         scaler = Scaler(max_layer=max_layer - 1, method=scaling_method)
 
-    # Check if the target is an OME-Zarr zip file (based on extension)
-    if isinstance(store_or_path, str) and _is_ome_zarr_zip_path(store_or_path):
-        # For OME-Zarr zip files, use temp directory approach
-        # then create spec-compliant ZIP archive
+    # Check if the target is a ZIP file (based on extension)
+    if isinstance(store_or_path, str) and store_or_path.endswith(".zip"):
+        # For ZIP files, use temp directory approach
+        import os
+        import shutil
+        import tempfile
+
         with tempfile.TemporaryDirectory() as tmpdir:
             # Save to temporary directory first
             temp_zarr_path = os.path.join(tmpdir, "temp.zarr")
-            store = zarr.open_group(temp_zarr_path, mode="w", zarr_format=3)
+            # Use Zarr v2 format for compatibility with OME-NGFF v0.4
+            store = zarr.open_group(temp_zarr_path, mode="w", zarr_format=2)
 
             # Write the data to OME-Zarr
             write_image(
@@ -472,6 +368,7 @@ def save_ngff_image_with_ome_zarr(
                 scaler=scaler,
                 coordinate_transformations=coordinate_transformations,
                 axes=axes,
+                fmt=fmt,
                 metadata={} if omero is None else {"omero": _to_primitive(omero)},
                 compute=compute,
                 **kwargs,
@@ -485,12 +382,14 @@ def save_ngff_image_with_ome_zarr(
                     # If we can't write orientation metadata, that's not critical
                     pass
 
-            # Create OME-Zarr zip file according to spec
-            _create_ome_zarr_zip(temp_zarr_path, store_or_path)
+            # Create ZIP file from the directory
+            zip_base_path = store_or_path.replace(".zip", "")
+            shutil.make_archive(zip_base_path, "zip", temp_zarr_path)
     else:
         # Write to zarr store directly
         if isinstance(store_or_path, str):
-            store = zarr.open_group(store_or_path, mode="w", zarr_format=3)
+            # Use Zarr v2 format for compatibility with OME-NGFF v0.4
+            store = zarr.open_group(store_or_path, mode="w", zarr_format=2)
         else:
             store = store_or_path
 
@@ -501,6 +400,7 @@ def save_ngff_image_with_ome_zarr(
             scaler=scaler,
             coordinate_transformations=coordinate_transformations,
             axes=axes,
+            fmt=fmt,
             metadata={} if omero is None else {"omero": _to_primitive(omero)},
             compute=compute,
             **kwargs,
@@ -932,11 +832,6 @@ def _apply_near_isotropic_downsampling(znimg: "ZarrNii", axes_order: str) -> "Za
     This function calculates downsampling factors for dimensions where the pixel sizes
     are smaller than others by at least an integer factor, making the image more isotropic.
 
-    Only applies this if exactly a single dimension requires correcting, e.g. so that
-    it won't downsample the x and y to match a lower-res z, but it will
-    downsample a z to match a x and y (this occurs if the multi-res pyramid only
-    downsamples in x and y).
-
     Args:
         znimg: Input ZarrNii instance
         axes_order: Spatial axes order ("ZYX" or "XYZ")
@@ -982,8 +877,8 @@ def _apply_near_isotropic_downsampling(znimg: "ZarrNii", axes_order: str) -> "Za
         else:
             downsample_factors.append(1)
 
-    # Only apply downsampling if exactly one factor is > 1
-    if sum(f > 1 for f in downsample_factors) == 1:
+    # Only apply downsampling if at least one factor is > 1
+    if any(factor > 1 for factor in downsample_factors):
         znimg = znimg.downsample(
             factors=downsample_factors, spatial_dims=available_dims
         )
@@ -1176,7 +1071,7 @@ def get_bounded_subregion_from_zarr(
 
     # Open the zarr store and read the subregion directly
     try:
-        if _is_ome_zarr_zip_path(store_path):
+        if store_path.endswith(".zip"):
             store = zarr.storage.ZipStore(store_path, mode="r")
             root = zarr.open_group(store, mode="r")
         else:
@@ -1204,7 +1099,7 @@ def get_bounded_subregion_from_zarr(
 
     finally:
         # Close ZIP store if used
-        if _is_ome_zarr_zip_path(store_path):
+        if store_path.endswith(".zip"):
             store.close()
 
     # Generate grid points for interpolation
@@ -1537,7 +1432,7 @@ class ZarrNii:
                             store_path_str = str(store_path)
 
                             # Open the zarr store to get the actual array shape
-                            if _is_ome_zarr_zip_path(store_path_str):
+                            if store_path_str.endswith(".zip"):
                                 zarr_store = zarr.storage.ZipStore(
                                     store_path_str, mode="r"
                                 )
@@ -1651,7 +1546,7 @@ class ZarrNii:
     def from_file(cls, path, **kwargs):
         if path.endswith((".nii", ".nii.gz")):
             return cls.from_nifti(path, **kwargs)
-        elif path.endswith(".zarr") or _is_ome_zarr_zip_path(path):
+        elif path.endswith(".zarr") or path.endswith(".zip"):
             return cls.from_ome_zarr(path, **kwargs)
         else:
             raise ValueError(f"Unknown file extension: {path}")
@@ -1927,8 +1822,8 @@ class ZarrNii:
         # Load the multiscales object
         try:
             if isinstance(store_or_path, str):
-                # Handle OME-Zarr zip files by creating a ZipStore
-                if _is_ome_zarr_zip_path(store_or_path):
+                # Handle ZIP files by creating a ZipStore
+                if store_or_path.endswith(".zip"):
                     import zarr
 
                     store = zarr.storage.ZipStore(store_or_path, mode="r")
@@ -1945,7 +1840,7 @@ class ZarrNii:
         except Exception as e:
             # Fallback for older zarr/ngff_zarr versions
             if isinstance(store_or_path, str):
-                if _is_ome_zarr_zip_path(store_or_path):
+                if store_or_path.endswith(".zip"):
                     import zarr
 
                     store = zarr.storage.ZipStore(store_or_path, mode="r")
@@ -1963,7 +1858,7 @@ class ZarrNii:
             import zarr
 
             if isinstance(store_or_path, str):
-                if _is_ome_zarr_zip_path(store_or_path):
+                if store_or_path.endswith(".zip"):
                     zip_store = zarr.storage.ZipStore(store_or_path, mode="r")
                     group = zarr.open_group(zip_store, mode="r")
                     # Close zip store after getting group
@@ -2024,7 +1919,7 @@ class ZarrNii:
             if orientation is None:
 
                 if isinstance(store_or_path, str):
-                    if _is_ome_zarr_zip_path(store_or_path):
+                    if store_or_path.endswith(".zip"):
                         zip_store = zarr.storage.ZipStore(store_or_path, mode="r")
                         group = zarr.open_group(zip_store, mode="r")
                         # Check for new xyz_orientation first, then fallback to legacy orientation
@@ -3188,8 +3083,13 @@ class ZarrNii:
         # Append the inverse of the current image's affine
         tfms_to_apply.append(self.affine.invert())
 
-        interp_znimg = ref_znimg.copy(
-            name=f"{self.name}_transformed_to_{ref_znimg.name}"
+        # Create new NgffImage from ref image
+        interp_ngff_image = nz.NgffImage(
+            data=ref_znimg.data,
+            dims=ref_znimg.ngff_image.dims.copy(),
+            scale=ref_znimg.ngff_image.scale.copy(),
+            translation=ref_znimg.ngff_image.translation.copy(),
+            name=f"{self.name}_transformed_to_{ref_znimg.name}",
         )
 
         # Try to get zarr store information for direct access (avoids nested compute)
@@ -3198,7 +3098,7 @@ class ZarrNii:
         # Lazily apply the transformations using dask
         if store_info is not None:
             # Use direct zarr access to avoid nested compute() calls
-            interp_znimg.data = da.map_blocks(
+            interp_ngff_image.data = da.map_blocks(
                 interp_by_block,  # Function to interpolate each block
                 ref_znimg.data,  # Reference image data
                 dtype=np.float32,  # Output data type
@@ -3210,7 +3110,7 @@ class ZarrNii:
             )
         else:
             # Fall back to passing ZarrNii instance (legacy behavior with nested compute)
-            interp_znimg.data = da.map_blocks(
+            interp_ngff_image.data = da.map_blocks(
                 interp_by_block,  # Function to interpolate each block
                 ref_znimg.data,  # Reference image data
                 dtype=np.float32,  # Output data type
@@ -3218,7 +3118,12 @@ class ZarrNii:
                 flo_znimg=self,  # Floating image to align (legacy)
             )
 
-        return interp_znimg
+        return ZarrNii.from_ngff_image(
+            interp_ngff_image,
+            axes_order=ref_znimg.axes_order,
+            xyz_orientation=ref_znimg.xyz_orientation,
+            omero=self.omero,
+        )
 
     # I/O operations
     def to_ome_zarr(
@@ -3331,10 +3236,8 @@ class ZarrNii:
             )
 
         # Add orientation metadata to the zarr store (only for non-ZIP files)
-        # For OME-Zarr zip files, orientation is handled inside save_ngff_image
-        if not (
-            isinstance(store_or_path, str) and _is_ome_zarr_zip_path(store_or_path)
-        ):
+        # For ZIP files, orientation is handled inside save_ngff_image
+        if not (isinstance(store_or_path, str) and store_or_path.endswith(".zip")):
             try:
                 import zarr
 
@@ -4359,25 +4262,20 @@ class ZarrNii:
 
         return zyx_image
 
-    def copy(self, name=None) -> "ZarrNii":
+    def copy(self) -> "ZarrNii":
         """
         Create a copy of this ZarrNii.
 
         Returns:
             New ZarrNii with copied data
         """
-        # Copy dims - tuples are immutable so can be used directly,
-        # lists need to be copied
-        dims = self.ngff_image.dims
-        copied_dims = dims if isinstance(dims, tuple) else list(dims)
-
         # Create a new NgffImage with the same properties
         copied_image = nz.NgffImage(
             data=self.ngff_image.data,  # Dask arrays are lazy so this is efficient
-            dims=copied_dims,
+            dims=self.ngff_image.dims.copy(),
             scale=self.ngff_image.scale.copy(),
             translation=self.ngff_image.translation.copy(),
-            name=self.ngff_image.name if name is None else name,
+            name=self.ngff_image.name,
         )
         return ZarrNii(
             ngff_image=copied_image,
@@ -4766,7 +4664,8 @@ class ZarrNii:
             "scale": self.scale,
             "translation": self.translation,
         }
-
+        #print(metadata)
+        #print(data)
         # Create a wrapper function for map_blocks
         def segment_block(block):
             """Wrapper function to apply segmentation to a single block."""
@@ -4781,14 +4680,42 @@ class ZarrNii:
             meta=np.array([], dtype=np.uint8),  # Provide meta information
         )
 
-        # Create copy with segmented data
-        segmented_znimg = self.copy(
-            name=f"{self.name}_segmented_{plugin.name.lower().replace(' ', '_')}"
+        # Create new NgffImage with segmented data
+        # new_ngff_image = nz.NgffImage(
+        #     data=segmented_data,
+        #     dims=self.dims.copy(),
+        #     scale=self.scale.copy(),
+        #     translation=self.translation.copy(),
+        #     name=f"{self.name}_segmented_{plugin.name.lower().replace(' ', '_')}",
+        # )
+        # Safely handle dims (which might be a tuple)
+        if isinstance(self.dims, tuple):
+            dims = list(self.dims)
+        else:
+            dims = self.dims.copy()
+
+        # Keep scale and translation as their original types (dict / array), just copy
+        scale = self.scale.copy() if hasattr(self.scale, "copy") else self.scale
+        translation = (
+            self.translation.copy()
+            if hasattr(self.translation, "copy")
+            else self.translation
         )
-        segmented_znimg.data = segmented_data
+
+        new_ngff_image = nz.NgffImage(
+            data=segmented_data,
+            dims=dims,
+            scale=scale,
+            translation=translation,
+            name=f"{self.name}_segmented_{plugin.name.lower().replace(' ', '_')}",
+        )
 
         # Return new ZarrNii instance
-        return segmented_znimg
+        return ZarrNii(
+            ngff_image=new_ngff_image,
+            axes_order=self.axes_order,
+            xyz_orientation=self.xyz_orientation,
+        )
 
     def segment_otsu(
         self, nbins: int = 256, chunk_size: Optional[Tuple[int, ...]] = None
@@ -4850,7 +4777,7 @@ class ZarrNii:
 
     def compute_histogram(
         self,
-        bins: Optional[int] = None,
+        bins: int = 256,
         range: Optional[Tuple[float, float]] = None,
         mask: Optional["ZarrNii"] = None,
         **kwargs: Any,
@@ -4863,7 +4790,7 @@ class ZarrNii:
         efficient processing of large datasets.
 
         Args:
-            bins: Number of histogram bins (default: bin width 1, bins=max - min + 1)
+            bins: Number of histogram bins (default: 256)
             range: Optional tuple (min, max) defining histogram range. If None,
                 uses the full range of the data
             mask: Optional ZarrNii mask of same shape as image. Only pixels
@@ -4893,7 +4820,7 @@ class ZarrNii:
     def compute_otsu_thresholds(
         self,
         classes: int = 2,
-        bins: Optional[int] = None,
+        bins: int = 256,
         range: Optional[Tuple[float, float]] = None,
         mask: Optional["ZarrNii"] = None,
         return_figure: bool = False,
@@ -4911,7 +4838,7 @@ class ZarrNii:
             classes: Number of classes to separate data into (default: 2).
                 Must be >= 2. For classes=2, returns 1 threshold. For classes=k,
                 returns k-1 thresholds.
-            bins: Number of histogram bins (default: bin width 1, bins=max - min + 1)
+            bins: Number of histogram bins (default: 256)
             range: Optional tuple (min, max) defining histogram range. If None,
                 uses the full range of the data
             mask: Optional ZarrNii mask of same shape as image. Only pixels
@@ -4963,150 +4890,33 @@ class ZarrNii:
             return_figure=return_figure,
         )
 
-    def create_mip(
+    def compute_centroids(
         self,
-        plane: str = "axial",
-        slab_thickness_um: float = 100.0,
-        slab_spacing_um: float = 100.0,
-        channel_colors: Optional[
-            List[
-                Union[
-                    str, Tuple[float, float, float], Tuple[float, float, float, float]
-                ]
-            ]
-        ] = None,
-        channel_ranges: Optional[List[Tuple[float, float]]] = None,
-        channel_labels: Optional[List[str]] = None,
-        return_slabs: bool = False,
-        scale_units: str = "mm",
-    ) -> Union[List[da.Array], Tuple[List[da.Array], List[dict]]]:
-        """
-        Create Maximum Intensity Projection (MIP) visualizations across slabs.
-
-        This method generates MIP visualizations by dividing the volume into slabs
-        along the specified plane, computing the maximum intensity projection within
-        each slab, then rendering with channel-specific colors. Returns lazy dask
-        arrays that are computed only when explicitly requested.
-
-        Args:
-            plane: Projection plane - one of 'axial', 'coronal', 'sagittal'.
-                - 'axial': projects along z-axis (creates xy slices)
-                - 'coronal': projects along y-axis (creates xz slices)
-                - 'sagittal': projects along x-axis (creates yz slices)
-            slab_thickness_um: Thickness of each slab in microns (default: 100.0)
-            slab_spacing_um: Spacing between slab centers in microns (default: 100.0)
-            channel_colors: Optional list of colors for each channel. Each color can be:
-                - Color name string (e.g., 'red', 'green', 'blue')
-                - RGB tuple with values 0-1 (e.g., (1.0, 0.0, 0.0) for red)
-                - RGBA tuple with values 0-1 (e.g., (1.0, 0.0, 0.0, 0.5) for semi-transparent red)
-                If None and OMERO metadata is available, uses OMERO channel colors.
-                Otherwise uses default colors: ['red', 'green', 'blue', 'cyan', 'magenta', 'yellow']
-            channel_ranges: Optional list of (min, max) tuples specifying intensity range
-                for each channel. If None and OMERO metadata is available, uses OMERO window
-                settings. Otherwise uses auto-scaling based on data min/max.
-            channel_labels: Optional list of channel label names to use for selecting
-                channels from OMERO metadata. If provided, channels are filtered and
-                reordered to match these labels. Requires OMERO metadata to be available.
-            return_slabs: If True, returns tuple of (mip_list, slab_info_list) where
-                slab_info_list contains metadata about each slab. If False (default),
-                returns only the mip_list.
-            scale_units: Units for scale values. Either "mm" (millimeters, default) or
-                "um" (microns). The ZarrNii scale values from NGFF/NIfTI are in millimeters
-                by default, so this should typically be left as "mm".
-
-        Returns:
-            If return_slabs is False (default):
-                List of 2D dask arrays, each containing an RGB MIP visualization for one slab.
-                Each array has shape (height, width, 3) with RGB values in range [0, 1].
-                Arrays are lazy and will only be computed when explicitly requested.
-
-            If return_slabs is True:
-                Tuple of (mip_list, slab_info_list) where:
-                - mip_list: List of 2D RGB dask arrays as described above
-                - slab_info_list: List of dictionaries with slab metadata including:
-                    - 'start_um': Start position of slab in microns
-                    - 'end_um': End position of slab in microns
-                    - 'center_um': Center position of slab in microns
-                    - 'start_idx': Start index in array coordinates
-                    - 'end_idx': End index in array coordinates
-
-        Examples:
-            >>> # Create axial MIPs with custom intensity ranges
-            >>> mips = znimg.create_mip(
-            ...     plane='axial',
-            ...     slab_thickness_um=100.0,
-            ...     slab_spacing_um=100.0,
-            ...     channel_colors=['red', 'green'],
-            ...     channel_ranges=[(0.0, 1000.0), (0.0, 5000.0)]
-            ... )
-            >>>
-            >>> # Use OMERO metadata for colors and ranges
-            >>> mips = znimg.create_mip(
-            ...     plane='axial',
-            ...     channel_labels=['DAPI', 'GFP']
-            ... )
-            >>>
-            >>> # Use alpha transparency
-            >>> mips = znimg.create_mip(
-            ...     plane='axial',
-            ...     channel_colors=[(1.0, 0.0, 0.0, 0.7), (0.0, 1.0, 0.0, 0.5)]
-            ... )
-        """
-        from .analysis import create_mip_visualization
-
-        return create_mip_visualization(
-            image=self.darr,
-            dims=self.dims,
-            scale=self.scale,
-            plane=plane,
-            slab_thickness_um=slab_thickness_um,
-            slab_spacing_um=slab_spacing_um,
-            channel_colors=channel_colors,
-            channel_ranges=channel_ranges,
-            omero_metadata=self.omero,
-            channel_labels=channel_labels,
-            return_slabs=return_slabs,
-            scale_units=scale_units,
-        )
-
-    def compute_region_properties(
-        self,
-        output_properties: Optional[Union[List[str], Dict[str, str]]] = None,
         depth: Union[int, Tuple[int, ...], Dict[int, int]] = 10,
         boundary: str = "none",
         rechunk: Optional[Union[int, Tuple[int, ...]]] = None,
-        output_path: Optional[str] = None,
-        region_filters: Optional[Dict[str, Tuple[str, Any]]] = None,
-    ) -> Optional[Dict[str, np.ndarray]]:
+    ) -> np.ndarray:
         """
-        Compute properties of binary segmentation objects with coordinate transformation.
+        Compute centroids of binary segmentation objects in physical coordinates.
 
         This method processes the binary image (typically output from a segmentation
-        plugin) to identify connected components and compute their properties using
-        scikit-image's regionprops. Coordinate-based properties (like centroid) are
-        automatically transformed to physical coordinates. The method processes the
-        image chunk-by-chunk with overlap to handle objects that span chunk boundaries.
+        plugin) to identify connected components and compute their centroids in
+        physical coordinates. It uses dask's map_overlap to efficiently process
+        large images in chunks with overlap to handle objects that span chunk
+        boundaries.
 
-        This is a generalized method that allows extraction of any combination of
-        regionprops properties, enabling downstream quantification and filtering.
-
-        For large datasets, use the output_path parameter to write properties directly
-        to a Parquet file on disk instead of returning them in memory.
+        The input image should be binary (0/1 values) at the highest resolution.
+        The function will:
+        1. Optionally rechunk the data for better processing efficiency
+        2. Add overlap padding to chunks (customizable via depth parameter)
+        3. Within each chunk:
+           - Label connected components using scikit-image
+           - Compute centroids using regionprops
+           - Convert to global voxel coordinates using block offsets
+           - Filter out centroids in overlap regions to avoid duplicates
+           - Convert to physical coordinates using the affine transform
 
         Args:
-            output_properties: Properties to extract. Can be either:
-                - List of regionprops property names to extract. Property names are
-                  used as output keys.
-                - Dict mapping regionprops property names to custom output names.
-                  Example: {'area': 'nvoxels', 'equivalent_diameter_area': 'equivdiam'}
-                Coordinate properties ('centroid', 'centroid_weighted') are automatically
-                transformed to physical coordinates and split into separate x, y, z
-                columns. When using a dict, coordinate property output names are suffixed
-                with '_x', '_y', '_z' (e.g., {'centroid': 'loc'} gives 'loc_x', 'loc_y',
-                'loc_z').
-                Default is ['centroid'].
-                Example list: ['centroid', 'area', 'equivalent_diameter_area']
-                Example dict: {'area': 'nvoxels', 'centroid': 'position'}
             depth: Number of elements of overlap between chunks. Can be:
                 - int: same depth for all dimensions (default: 10)
                 - tuple: different depth per dimension
@@ -5118,84 +4928,42 @@ class ZarrNii:
                 - int: target chunk size for all dimensions
                 - tuple: target chunk size per dimension
                 - None: use existing chunks (default)
-            output_path: Optional path to write properties to Parquet file instead of
-                returning them in memory. If provided, properties are written to this
-                file path and None is returned. Use this for large datasets.
-                If None (default), properties are returned as a dict.
-            region_filters: Optional dictionary specifying filters to apply to detected
-                regions based on scikit-image regionprops properties. Each key is a
-                property name (e.g., 'area', 'perimeter', 'eccentricity'), and the value
-                is a tuple of (operator, threshold) where operator is one of:
-                '>', '>=', '<', '<=', '==', '!='.
-                Regions that don't satisfy ALL filters are excluded.
-                Example: {'area': ('>=', 30), 'eccentricity': ('<', 0.9)}
-                If None (default), no filtering is applied.
 
         Returns:
-            Optional[Dict[str, numpy.ndarray]]: If output_path is None, returns a
-                dictionary mapping property names (or custom names if dict was used)
-                to numpy arrays. For coordinate properties like 'centroid', the keys
-                are suffixed with _x, _y, _z (e.g., 'centroid_x' or 'custom_name_x')
-                containing physical coordinates.
-                Scalar properties have their name (or custom name) as the key.
-                If output_path is provided, writes to Parquet file and returns None.
+            numpy.ndarray: Nx3 array of physical coordinates for N detected objects,
+                where each row contains [x, y, z] coordinates in physical space.
+                The array has dtype float64.
 
         Notes:
             - This method expects a binary image (e.g., from segment_threshold).
             - Objects with centroids in overlap regions are filtered to avoid duplicates.
             - Uses 26-connectivity (connectivity=3) for 3D connected component labeling.
-            - Coordinate properties ('centroid', 'centroid_weighted') are transformed
-              to physical coordinates and split into suffixed columns (e.g.,
-              'centroid_x', 'centroid_y', 'centroid_z' or when renamed via dict,
-              'custom_name_x', 'custom_name_y', 'custom_name_z').
-            - Scalar properties are included directly without transformation.
-            - Available regionprops properties include: 'area', 'area_bbox', 'centroid',
-              'eccentricity', 'equivalent_diameter_area', 'euler_number', 'extent',
-              'feret_diameter_max', 'axis_major_length', 'axis_minor_length',
-              'moments', 'perimeter', 'solidity', and more.
+            - Empty chunks contribute no coordinates to the result.
+            - The result is computed immediately (not lazy).
 
         Examples:
-            >>> # Extract centroid and area
-            >>> props = binary.compute_region_properties(
-            ...     output_properties=['centroid', 'area'],
-            ...     depth=5
-            ... )
-            >>> print(f"Found {len(props['centroid_x'])} objects")
-            >>> print(f"Areas: {props['area']}")
+            >>> # Apply threshold segmentation and compute centroids
+            >>> binary = znimg.segment_threshold(0.5)
+            >>> centroids = binary.compute_centroids(depth=5)
+            >>> print(f"Found {len(centroids)} objects")
             >>>
-            >>> # Extract multiple properties with filtering
-            >>> props = binary.compute_region_properties(
-            ...     output_properties=['centroid', 'area', 'equivalent_diameter_area'],
-            ...     depth=5,
-            ...     region_filters={'area': ('>=', 30)}
+            >>> # With custom chunking
+            >>> centroids = binary.compute_centroids(
+            ...     depth=15,
+            ...     rechunk=(64, 64, 64)
             ... )
             >>>
-            >>> # Use dict to rename output columns
-            >>> props = binary.compute_region_properties(
-            ...     output_properties={'area': 'nvoxels', 'centroid': 'position'},
-            ...     depth=5
-            ... )
-            >>> print(f"Number of voxels: {props['nvoxels']}")
-            >>> print(f"Position X: {props['position_x']}")
-            >>>
-            >>> # Write to Parquet for large datasets
-            >>> binary.compute_region_properties(
-            ...     output_properties=['centroid', 'area', 'eccentricity'],
-            ...     depth=5,
-            ...     output_path='region_props.parquet'
-            ... )
+            >>> # Save centroids to file
+            >>> np.savetxt('centroids.txt', centroids, fmt='%.6f')
         """
-        from .analysis import compute_region_properties
+        from .analysis import compute_centroids
 
-        return compute_region_properties(
+        return compute_centroids(
             self.darr,
             affine=self.affine.matrix,
-            output_properties=output_properties,
             depth=depth,
             boundary=boundary,
             rechunk=rechunk,
-            output_path=output_path,
-            region_filters=region_filters,
         )
 
     def apply_scaled_processing(

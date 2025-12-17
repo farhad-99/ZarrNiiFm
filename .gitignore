@@ -29,3 +29,10 @@ test_znimg.ome.zarr/
 # Generated files that should not be tracked
 zarrnii/_version.py
 __pycache__/
+
+data/
+results/
+*.nii.gz
+*.pt
+
+resuls.tar
