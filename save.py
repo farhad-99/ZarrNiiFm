@@ -11,8 +11,9 @@ def main(cfg: DictConfig):
     chunk_size = (1,500,500,500)
     img = ZarrNii.from_ome_zarr('/nfs/trident3/lightsheet/prado/mouse_app_lecanemab_batch3/bids/sub-AS164F5/micr/sub-AS164F5_sample-brain_acq-imaris4x_SPIM.ome.zarr', channel_labels=['CD31'],level=3, downsample_near_isotropic=True, chunks=chunk_size, rechunk=True)
 
-    atlas = ZarrNiiAtlas.from_files('/tmp/ZarrNii/ZarrNii/data/lightsheet/sub-AS134F3_sample-brain_acq-imaris4x_seg-all_from-ABAv3_level-5_desc-deform_dseg.nii.gz',
-                            '/tmp/ZarrNii/ZarrNii/data/lightsheet/seg-all_tpl-ABAv3_dseg.tsv')
+    
+    atlas = ZarrNiiAtlas.from_files('/nfs/trident3/lightsheet/prado/mouse_app_lecanemab_ki3_batch1/derivatives/spimquant_aae813e/sub-AS134F3/micr/sub-AS134F3_sample-brain_acq-imaris4x_seg-all_from-ABAv3_level-5_desc-deform_dseg.nii.gz',
+                            '/nfs/trident3/lightsheet/prado/mouse_app_lecanemab_ki3_batch1/derivatives/spimquant_aae813e/tpl-ABAv3/seg-all_tpl-ABAv3_dseg.tsv')
     # Crop using atlas region
     cropped = img.crop_with_bounding_box(*atlas.get_region_bounding_box(regex='right Agranular Insular Area'),ras_coords=True)
 

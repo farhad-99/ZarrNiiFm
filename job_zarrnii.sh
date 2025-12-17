@@ -29,8 +29,8 @@ mkdir -p ${TMP_DIR}/tmp_results
 cp -r ${PERSISTENT_DIR} ${TMP_DIR} #cp -r /nfs/khan/trainees/ffallahz/ZarrNii /tmp/ZarrNii
 
 #cp -r /nfs/trident3/lightsheet/prado/mouse_app_lecanemab_batch3/bids/sub-AS164F5/micr/sub-AS164F5_sample-brain_acq-imaris4x_SPIM.ome.zarr ${TMP_DIR}/ZarrNii/data/lightsheet
-cp /nfs/trident3/lightsheet/prado/mouse_app_lecanemab_ki3/derivatives/spimquant_aae813e/sub-AS134F3/micr/sub-AS134F3_sample-brain_acq-imaris4x_seg-all_from-ABAv3_level-5_desc-deform_dseg.nii.gz ${TMP_DIR}/ZarrNii/data/lightsheet
-cp /nfs/trident3/lightsheet/prado/mouse_app_lecanemab_ki3/derivatives/spimquant_aae813e/tpl-ABAv3/seg-all_tpl-ABAv3_dseg.tsv ${TMP_DIR}/ZarrNii/data/lightsheet
+cp "/nfs/trident3/lightsheet/prado/mouse_app_lecanemab_ki3_batch1/derivatives/spimquant_aae813e/sub-AS134F3/micr/sub-AS134F3_sample-brain_acq-imaris4x_seg-all_from-ABAv3_level-5_desc-deform_dseg.nii.gz" ${TMP_DIR}/ZarrNii/data/lightsheet
+cp "/nfs/trident3/lightsheet/prado/mouse_app_lecanemab_ki3_batch1/derivatives/spimquant_aae813e/tpl-ABAv3/seg-all_tpl-ABAv3_dseg.tsv" ${TMP_DIR}/ZarrNii/data/lightsheet
 
 
 # Copy current working directory (codebase) to /tmp

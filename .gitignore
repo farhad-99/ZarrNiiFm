@@ -32,7 +32,9 @@ __pycache__/
 
 data/
 results/
+checkpoints/
 *.nii.gz
 *.pt
+*.nii
 
-resuls.tar
+results.tar
